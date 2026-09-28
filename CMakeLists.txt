@@ -42,9 +42,11 @@ add_library(minhook STATIC
     ${minhook_SOURCE_DIR}/src/hde/hde64.c)
 target_include_directories(minhook PUBLIC ${minhook_SOURCE_DIR}/include)
 
-# opengl backend, only the java dll uses it
-add_library(imgui_gl2 STATIC ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
-target_link_libraries(imgui_gl2 PUBLIC imgui opengl32)
+# opengl backends, only the java dll uses them (gl3 normally, gl2 for really old drivers)
+add_library(imgui_gl STATIC
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+target_link_libraries(imgui_gl PUBLIC imgui opengl32)
 
 # ---- the client dlls ----
 # everything under src/ is shared, except the renderer hook which is picked per edition
@@ -74,10 +76,10 @@ target_link_libraries(TarClient PRIVATE d3d11 d3d12 dxgi)
 file(GLOB TAR_GL_SOURCES CONFIGURE_DEPENDS src/hooks/gl/*.cpp)
 tar_client(TarClientJava ${TAR_GL_SOURCES})
 target_compile_definitions(TarClientJava PRIVATE TAR_JAVA)
-target_link_libraries(TarClientJava PRIVATE imgui_gl2 opengl32)
+target_link_libraries(TarClientJava PRIVATE imgui_gl opengl32)
 
 if(MSVC)
-    set_property(TARGET imgui imgui_gl2 minhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET imgui imgui_gl minhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # ---- tiny injector ----

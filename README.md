@@ -3,7 +3,7 @@
 An injectable ImGui overlay/click GUI for Minecraft **Bedrock** and **Java** on Windows. It builds two DLLs that share the same menu, modules and config code:
 
 - `TarClient.dll` for Bedrock hooks the game's DirectX 12 (or DirectX 11) swap chain
-- `TarClientJava.dll` for Java hooks `wglSwapBuffers` and draws with its own OpenGL context, so it works on any version (1.8 through current, with or without mods)
+- `TarClientJava.dll` for Java hooks `wglSwapBuffers` and draws in the game's own OpenGL context, so it works on any version (1.8 through current, with or without mods)
 
 - Click GUI with a home page, search, categories, settings, and friends pages
 - Module system with settings (toggle, slider, mode, and color), keybinds, and animations
@@ -67,7 +67,7 @@ src/
   hooks/Renderer.h       install / uninstall, implemented once per edition
   hooks/Common.*         shared: minhook, wndproc input, cursor hooks, imgui context
   hooks/dx/              bedrock: dx12/dx11 present hook with d3d11on12
-  hooks/gl/              java: wglSwapBuffers hook with a separate gl context
+  hooks/gl/              java: wglSwapBuffers hook, draws in the game's gl context
   gui/ClickGui.*         the menu
   gui/Widgets.*          toggles, sliders, keybind boxes...
   gui/Icons.*            line icons drawn with the draw list
