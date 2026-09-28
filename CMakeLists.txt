@@ -42,19 +42,42 @@ add_library(minhook STATIC
     ${minhook_SOURCE_DIR}/src/hde/hde64.c)
 target_include_directories(minhook PUBLIC ${minhook_SOURCE_DIR}/include)
 
-# ---- the client dll ----
+# opengl backend, only the java dll uses it
+add_library(imgui_gl2 STATIC ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+target_link_libraries(imgui_gl2 PUBLIC imgui opengl32)
+
+# ---- the client dlls ----
+# everything under src/ is shared, except the renderer hook which is picked per edition
 file(GLOB_RECURSE TAR_SOURCES CONFIGURE_DEPENDS src/*.cpp)
-add_library(TarClient SHARED ${TAR_SOURCES})
-set_target_properties(TarClient PROPERTIES PREFIX "")
-target_include_directories(TarClient PRIVATE src)
-target_compile_definitions(TarClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-target_link_libraries(TarClient PRIVATE imgui minhook d3d11 d3d12 dxgi)
+list(FILTER TAR_SOURCES EXCLUDE REGEX "src/hooks/(dx|gl)/")
+
+function(tar_client name)
+    add_library(${name} SHARED ${TAR_SOURCES} ${ARGN})
+    set_target_properties(${name} PROPERTIES PREFIX "")
+    target_include_directories(${name} PRIVATE src)
+    target_compile_definitions(${name} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(${name} PRIVATE imgui minhook)
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /W3 /utf-8)
+        set_property(TARGET ${name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    else()
+        target_link_options(${name} PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+endfunction()
+
+# bedrock: hooks the dx12 / dx11 swap chain
+file(GLOB TAR_DX_SOURCES CONFIGURE_DEPENDS src/hooks/dx/*.cpp)
+tar_client(TarClient ${TAR_DX_SOURCES})
+target_link_libraries(TarClient PRIVATE d3d11 d3d12 dxgi)
+
+# java: hooks wglSwapBuffers
+file(GLOB TAR_GL_SOURCES CONFIGURE_DEPENDS src/hooks/gl/*.cpp)
+tar_client(TarClientJava ${TAR_GL_SOURCES})
+target_compile_definitions(TarClientJava PRIVATE TAR_JAVA)
+target_link_libraries(TarClientJava PRIVATE imgui_gl2 opengl32)
+
 if(MSVC)
-    target_compile_options(TarClient PRIVATE /W3 /utf-8)
-    set_property(TARGET TarClient imgui minhook PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-else()
-    target_link_options(TarClient PRIVATE -static -static-libgcc -static-libstdc++)
+    set_property(TARGET imgui imgui_gl2 minhook PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # ---- tiny injector ----

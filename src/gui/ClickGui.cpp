@@ -150,7 +150,7 @@ namespace {
     }
 
     void homePage(float width) {
-        heading("Welcome back", TAR_CLIENT_NAME " v" TAR_CLIENT_VERSION);
+        heading("Welcome back", TAR_CLIENT_NAME " v" TAR_CLIENT_VERSION " for " TAR_CLIENT_EDITION);
 
         int enabled = 0;
         for (auto& m : ModuleManager::all()) enabled += m->isEnabled();

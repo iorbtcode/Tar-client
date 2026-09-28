@@ -17,6 +17,7 @@ Contents
   7. Input + client helpers
   8. Talking to other modules
   9. Adding a new icon or category
+ 9b. Java vs Bedrock
  10. Rules / gotchas
  11. Full examples
 
@@ -303,6 +304,26 @@ Category:
 
 
 ---------------------------------------------------------------------
+9b. JAVA VS BEDROCK
+---------------------------------------------------------------------
+
+Every module is compiled into both TarClient.dll (bedrock) and
+TarClientJava.dll (java), you write it once and it works in both.
+
+If something should only exist in one edition, use the TAR_JAVA define
+that cmake sets for the java dll:
+
+    #ifdef TAR_JAVA
+        add<JavaOnlyThing>();
+    #else
+        add<BedrockOnlyThing>();
+    #endif
+
+TAR_CLIENT_EDITION (from core/Client.h) is "Java" or "Bedrock" if you
+just want to show it somewhere.
+
+
+---------------------------------------------------------------------
 10. RULES / GOTCHAS
 ---------------------------------------------------------------------
 
@@ -315,7 +336,7 @@ Category:
   - Don't free/replace the settings vector, keep your pointers
   - The gui blocks keyboard/mouse from the game while it's open, and
     your onKey / onMouse won't fire then either
-  - Rendering happens on top of the finished frame, so modules can only
+  - Rendering happens on top of the finished frame (in both editions), so modules can only
     draw overlays. Anything that reads or changes the game itself needs
     game specific hooks/offsets that change every Minecraft update and
     aren't part of this base

@@ -1,7 +1,6 @@
 #include "hooks/Renderer.h"
 
 #include <atomic>
-#include <mutex>
 #include <vector>
 
 #include <windows.h>
@@ -11,24 +10,20 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 
-#include <MinHook.h>
 #include <imgui.h>
 #include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 
 #include "core/Client.h"
-#include "gui/ClickGui.h"
-#include "gui/Theme.h"
+#include "hooks/Common.h"
 
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-// How it works:
+// Bedrock renderer hook. How it works:
 //  1. make a throwaway d3d12 device + swap chain to read the addresses of Present / ResizeBuffers
 //     out of their vtables (every swap chain in the process shares them), then hook them with minhook
 //  2. hook ID3D12CommandQueue::ExecuteCommandLists to grab the game's direct queue
 //  3. on the first real Present, check whether the game runs d3d12 or d3d11.
 //     for d3d12 we wrap it in a d3d11on12 device so the regular imgui dx11 backend can draw on the back buffers
-//  4. subclass the game window to feed input to imgui and block it from the game while the menu is open
+//  4. input + cursor handling is shared with the java build, see hooks/Common.cpp
 
 namespace {
     template <typename T>
@@ -41,36 +36,19 @@ namespace {
     using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
     using ResizeBuffers1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
     using ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
-    using SetCursorPosFn = BOOL(WINAPI*)(int, int);
-    using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 
     PresentFn oPresent = nullptr;
     ResizeBuffersFn oResizeBuffers = nullptr;
     ResizeBuffers1Fn oResizeBuffers1 = nullptr;
     ExecuteCommandListsFn oExecuteCommandLists = nullptr;
-    SetCursorPosFn oSetCursorPos = nullptr;
-    ClipCursorFn oClipCursor = nullptr;
-
-    std::vector<void*> hookedTargets;
-
-    // everything imgui touches is guarded by this, the window proc and Present can run on different threads
-    std::recursive_mutex mutex;
-    std::atomic_int inFlight = 0; // hooks currently executing, so unloading waits for them
-    std::atomic_bool shuttingDown = false;
-
-    struct InFlight {
-        InFlight() { ++inFlight; }
-        ~InFlight() { --inFlight; }
-    };
 
     enum class Backend { None, DX11, DX12 };
 
+    using Hooks::InFlight;
+
     struct State {
         Backend backend = Backend::None;
-        bool imguiReady = false;  // context + win32 backend + wndproc hook
         bool dx11Ready = false;   // imgui dx11 backend
-        HWND hwnd = nullptr;
-        WNDPROC originalWndProc = nullptr;
         IDXGISwapChain* swapChain = nullptr; // not owned, only compared
 
         ID3D11Device* device11 = nullptr;
@@ -85,73 +63,6 @@ namespace {
 
     // grabbed from ExecuteCommandLists, which the game calls from its own threads
     std::atomic<ID3D12CommandQueue*> gameQueue = nullptr;
-
-    // ---------------------------------------------------------------- input
-
-    bool isInputMessage(UINT msg) {
-        return (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || msg == WM_INPUT;
-    }
-
-    bool isReleaseMessage(UINT msg) {
-        return msg == WM_KEYUP || msg == WM_SYSKEYUP || msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP ||
-               msg == WM_XBUTTONUP;
-    }
-
-    LRESULT CALLBACK hkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        InFlight guard;
-        WNDPROC original = g.originalWndProc;
-        if (shuttingDown || !g.imguiReady) return CallWindowProcW(original, hwnd, msg, wParam, lParam);
-
-        bool block = false;
-        {
-            std::lock_guard lock(mutex);
-
-            switch (msg) {
-            case WM_KEYDOWN:
-            case WM_SYSKEYDOWN:
-                if (!(lParam & (1 << 30))) block |= Client::onKey(int(wParam), true); // ignore auto repeat
-                else block |= ClickGui::isOpen();
-                break;
-            case WM_KEYUP:
-            case WM_SYSKEYUP: block |= Client::onKey(int(wParam), false); break;
-            case WM_LBUTTONDOWN: block |= Client::onMouse(0, true); break;
-            case WM_LBUTTONUP: block |= Client::onMouse(0, false); break;
-            case WM_RBUTTONDOWN: block |= Client::onMouse(1, true); break;
-            case WM_RBUTTONUP: block |= Client::onMouse(1, false); break;
-            case WM_MBUTTONDOWN: block |= Client::onMouse(2, true); break;
-            case WM_MBUTTONUP: block |= Client::onMouse(2, false); break;
-            case WM_XBUTTONDOWN: block |= Client::onMouse(GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4, true); break;
-            case WM_XBUTTONUP: block |= Client::onMouse(GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4, false); break;
-            case WM_KILLFOCUS: ClickGui::setOpen(false); break;
-            default: break;
-            }
-
-            ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
-            if (ClickGui::isOpen() && (isInputMessage(msg) || msg == WM_CHAR)) block = true;
-            // always let releases through, otherwise a key held while opening the menu gets stuck down in game
-            if (isReleaseMessage(msg)) block = false;
-        }
-
-        if (block) {
-            // raw input still needs DefWindowProc so windows can clean up its buffer
-            if (msg == WM_INPUT) return DefWindowProcW(hwnd, msg, wParam, lParam);
-            return 0;
-        }
-        return CallWindowProcW(original, hwnd, msg, wParam, lParam);
-    }
-
-    // the game re-centers and locks the cursor every frame, stop that while the menu is open
-    BOOL WINAPI hkSetCursorPos(int x, int y) {
-        InFlight guard;
-        if (ClickGui::isOpen() && !shuttingDown) return TRUE;
-        return oSetCursorPos(x, y);
-    }
-
-    BOOL WINAPI hkClipCursor(const RECT* rect) {
-        InFlight guard;
-        if (ClickGui::isOpen() && !shuttingDown) return oClipCursor(nullptr);
-        return oClipCursor(rect);
-    }
 
     // ---------------------------------------------------------------- d3d
 
@@ -249,30 +160,16 @@ namespace {
     bool initImGui(IDXGISwapChain* sc) {
         DXGI_SWAP_CHAIN_DESC desc{};
         sc->GetDesc(&desc);
-        g.hwnd = desc.OutputWindow;
+        Hooks::attachWindow(desc.OutputWindow);
 
-        if (!ImGui::GetCurrentContext()) {
-            ImGui::CreateContext();
-            ImGuiIO& io = ImGui::GetIO();
-            io.IniFilename = nullptr;
-            io.LogFilename = nullptr;
-            io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-            Theme::loadFonts();
-            Theme::applyStyle();
-            ImGui_ImplWin32_Init(g.hwnd);
-        }
         if (!ImGui_ImplDX11_Init(g.device11, g.context11)) return false;
         g.dx11Ready = true;
-
-        if (!g.originalWndProc)
-            g.originalWndProc = WNDPROC(SetWindowLongPtrW(g.hwnd, GWLP_WNDPROC, LONG_PTR(hkWndProc)));
-        g.imguiReady = true;
         return true;
     }
 
     void renderFrame(IDXGISwapChain* sc) {
-        std::lock_guard lock(mutex);
-        if (shuttingDown) return;
+        std::lock_guard lock(Hooks::mutex());
+        if (Hooks::shuttingDown()) return;
 
         // swap chain changed (fullscreen toggle, device reset...) -> rebuild what depends on it
         if (sc != g.swapChain) {
@@ -308,6 +205,7 @@ namespace {
             if (index >= g.targets.size()) return;
         }
 
+        Hooks::beginFrame();
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -334,7 +232,7 @@ namespace {
     HRESULT STDMETHODCALLTYPE hkResizeBuffers(IDXGISwapChain* sc, UINT count, UINT w, UINT h, DXGI_FORMAT fmt, UINT flags) {
         InFlight guard;
         {
-            std::lock_guard lock(mutex);
+            std::lock_guard lock(Hooks::mutex());
             releaseTargets(); // the game can't resize while we still hold the back buffers
         }
         return oResizeBuffers(sc, count, w, h, fmt, flags);
@@ -344,7 +242,7 @@ namespace {
                                                const UINT* nodeMask, IUnknown* const* queues) {
         InFlight guard;
         {
-            std::lock_guard lock(mutex);
+            std::lock_guard lock(Hooks::mutex());
             releaseTargets();
         }
         return oResizeBuffers1(sc, count, w, h, fmt, flags, nodeMask, queues);
@@ -358,13 +256,6 @@ namespace {
             if (!gameQueue.compare_exchange_strong(expected, queue)) queue->Release();
         }
         oExecuteCommandLists(queue, count, lists);
-    }
-
-    bool hook(void* target, void* detour, void** original) {
-        if (MH_CreateHook(target, detour, original) != MH_OK) return false;
-        if (MH_EnableHook(target) != MH_OK) return false;
-        hookedTargets.push_back(target);
-        return true;
     }
 
     void* vfunc(void* object, int index) { return (*static_cast<void***>(object))[index]; }
@@ -457,7 +348,7 @@ namespace {
 }
 
 bool Renderer::install() {
-    if (MH_Initialize() != MH_OK) return false;
+    if (!Hooks::init()) return false;
 
     VTables vt;
     {
@@ -466,43 +357,22 @@ bool Renderer::install() {
         if (!findDx12(window.hwnd, vt) && !findDx11(window.hwnd, vt)) return false;
     }
 
-    if (!hook(vt.present, reinterpret_cast<void*>(&hkPresent), reinterpret_cast<void**>(&oPresent))) return false;
-    if (!hook(vt.resizeBuffers, reinterpret_cast<void*>(&hkResizeBuffers), reinterpret_cast<void**>(&oResizeBuffers))) return false;
+    if (!Hooks::hook(vt.present, reinterpret_cast<void*>(&hkPresent), reinterpret_cast<void**>(&oPresent))) return false;
+    if (!Hooks::hook(vt.resizeBuffers, reinterpret_cast<void*>(&hkResizeBuffers), reinterpret_cast<void**>(&oResizeBuffers))) return false;
     if (vt.resizeBuffers1)
-        hook(vt.resizeBuffers1, reinterpret_cast<void*>(&hkResizeBuffers1), reinterpret_cast<void**>(&oResizeBuffers1));
+        Hooks::hook(vt.resizeBuffers1, reinterpret_cast<void*>(&hkResizeBuffers1), reinterpret_cast<void**>(&oResizeBuffers1));
     if (vt.executeCommandLists)
-        hook(vt.executeCommandLists, reinterpret_cast<void*>(&hkExecuteCommandLists), reinterpret_cast<void**>(&oExecuteCommandLists));
+        Hooks::hook(vt.executeCommandLists, reinterpret_cast<void*>(&hkExecuteCommandLists), reinterpret_cast<void**>(&oExecuteCommandLists));
 
-    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
-        hook(reinterpret_cast<void*>(GetProcAddress(user32, "SetCursorPos")), reinterpret_cast<void*>(&hkSetCursorPos),
-             reinterpret_cast<void**>(&oSetCursorPos));
-        hook(reinterpret_cast<void*>(GetProcAddress(user32, "ClipCursor")), reinterpret_cast<void*>(&hkClipCursor),
-             reinterpret_cast<void**>(&oClipCursor));
-    }
     return true;
 }
 
 void Renderer::uninstall() {
-    shuttingDown = true;
-    for (void* target : hookedTargets) MH_DisableHook(target);
-
+    Hooks::disable();
     {
-        std::lock_guard lock(mutex);
-        if (g.hwnd && g.originalWndProc) SetWindowLongPtrW(g.hwnd, GWLP_WNDPROC, LONG_PTR(g.originalWndProc));
+        std::lock_guard lock(Hooks::mutex());
+        releaseDevice();
+        if (ID3D12CommandQueue* queue = gameQueue.exchange(nullptr)) queue->Release();
     }
-
-    // let any hook that was mid-call finish before tearing things down
-    while (inFlight > 0) Sleep(10);
-    Sleep(100);
-
-    std::lock_guard lock(mutex);
-    releaseDevice();
-    if (ImGui::GetCurrentContext()) {
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-    }
-    g.imguiReady = false;
-    if (ID3D12CommandQueue* queue = gameQueue.exchange(nullptr)) queue->Release();
-
-    MH_Uninitialize();
+    Hooks::destroy();
 }

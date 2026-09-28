@@ -27,19 +27,27 @@ namespace {
 
     std::string findPath() {
         // newer bedrock (gdk) can write to %APPDATA%, older uwp builds only to their RoamingState
+        // java and bedrock keep separate configs
+#ifdef TAR_JAVA
+        const char* file = "config_java.txt";
+#else
+        const char* file = "config.txt";
+#endif
         std::vector<fs::path> candidates;
         if (const char* appdata = std::getenv("APPDATA"))
             candidates.push_back(fs::path(appdata) / "TarClient");
+#ifndef TAR_JAVA
         if (const char* local = std::getenv("LOCALAPPDATA"))
             candidates.push_back(fs::path(local) / "Packages" / "Microsoft.MinecraftUWP_8wekyb3d8bbwe" / "RoamingState" / "TarClient");
+#endif
 
         for (auto& dir : candidates)
-            if (canWrite(dir)) return (dir / "config.txt").string();
+            if (canWrite(dir)) return (dir / file).string();
 
         // last resort, next to the dll
         wchar_t buf[MAX_PATH];
         GetModuleFileNameW(Client::self(), buf, MAX_PATH);
-        return (fs::path(buf).parent_path() / "tarclient_config.txt").string();
+        return (fs::path(buf).parent_path() / (std::string("tarclient_") + file)).string();
     }
 
     std::string trim(std::string s) {

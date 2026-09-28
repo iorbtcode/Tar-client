@@ -1,5 +1,7 @@
-// Tiny LoadLibrary injector for Minecraft Bedrock.
-// usage: TarInjector.exe [path\to\TarClient.dll]   (defaults to TarClient.dll next to the exe)
+// Tiny LoadLibrary injector for Minecraft Bedrock and Java.
+// usage: TarInjector.exe [--bedrock | --java] [path\to\dll]
+//   no edition flag: bedrock if it's running, otherwise java
+//   no dll: TarClient.dll (bedrock) or TarClientJava.dll (java) next to the exe
 #include <windows.h>
 
 #include <aclapi.h>
@@ -22,6 +24,25 @@ namespace {
             }
         CloseHandle(snap);
         return pid;
+    }
+
+    // java runs inside java.exe / javaw.exe, and other java apps can be open too,
+    // so look for the game's window instead (GLFW30 = 1.13+, LWJGL = 1.8 - 1.12)
+    DWORD findJavaMinecraft() {
+        struct Search { DWORD pid = 0; } search;
+        EnumWindows(
+            [](HWND hwnd, LPARAM param) -> BOOL {
+                wchar_t cls[64] = {};
+                GetClassNameW(hwnd, cls, 64);
+                if (wcscmp(cls, L"GLFW30") != 0 && wcscmp(cls, L"LWJGL") != 0) return TRUE;
+                wchar_t title[256] = {};
+                GetWindowTextW(hwnd, title, 256);
+                if (!wcsstr(title, L"Minecraft")) return TRUE;
+                GetWindowThreadProcessId(hwnd, &reinterpret_cast<Search*>(param)->pid);
+                return FALSE;
+            },
+            reinterpret_cast<LPARAM>(&search));
+        return search.pid;
     }
 
     // uwp builds of the game run in an app container and can only load files that
@@ -59,14 +80,26 @@ namespace {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    enum class Edition { Auto, Bedrock, Java } edition = Edition::Auto;
     std::wstring dll;
-    if (argc > 1) {
-        dll = argv[1];
-    } else {
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--java") == 0) edition = Edition::Java;
+        else if (_wcsicmp(argv[i], L"--bedrock") == 0) edition = Edition::Bedrock;
+        else dll = argv[i];
+    }
+
+    DWORD pid = 0;
+    if (edition != Edition::Java && (pid = findProcess(L"Minecraft.Windows.exe"))) edition = Edition::Bedrock;
+    else if (edition != Edition::Bedrock && (pid = findJavaMinecraft())) edition = Edition::Java;
+    if (!pid) return fail("Minecraft isn't running, open the game first");
+    bool java = edition == Edition::Java;
+    std::printf("[+] found Minecraft %s (pid %lu)\n", java ? "Java" : "Bedrock", pid);
+
+    if (dll.empty()) {
         wchar_t exe[MAX_PATH];
         GetModuleFileNameW(nullptr, exe, MAX_PATH);
         dll = exe;
-        dll = dll.substr(0, dll.find_last_of(L"\\/") + 1) + L"TarClient.dll";
+        dll = dll.substr(0, dll.find_last_of(L"\\/") + 1) + (java ? L"TarClientJava.dll" : L"TarClient.dll");
     }
 
     wchar_t full[MAX_PATH];
@@ -74,11 +107,7 @@ int wmain(int argc, wchar_t** argv) {
         return fail("couldn't find the dll");
     dll = full;
 
-    DWORD pid = findProcess(L"Minecraft.Windows.exe");
-    if (!pid) return fail("Minecraft isn't running, open the game first");
-    std::printf("[+] found Minecraft (pid %lu)\n", pid);
-
-    allowAppContainer(dll);
+    if (!java) allowAppContainer(dll);
 
     HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!process) return fail("couldn't open the game process");
