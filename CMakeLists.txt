@@ -82,6 +82,9 @@ endif()
 
 # ---- tiny injector ----
 add_executable(TarInjector injector/Injector.cpp)
+if(MSVC)
+    target_compile_options(TarInjector PRIVATE /utf-8)
+endif()
 target_compile_definitions(TarInjector PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_link_libraries(TarInjector PRIVATE advapi32)
 if(MSVC)
