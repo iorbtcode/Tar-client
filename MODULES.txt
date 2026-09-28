@@ -1,0 +1,344 @@
+=====================================================================
+                    TAR CLIENT - HOW TO MAKE MODULES
+=====================================================================
+
+A module is one toggleable feature that shows up as a row in the click
+gui (like "FPS Counter" or "Crosshair"). Every module is a C++ class
+that inherits from Module (or HudModule for things drawn in a box on
+screen). You make the class, register it in one line and rebuild.
+
+Contents
+  1. Quick start (the 3 steps)
+  2. The Module constructor
+  3. Events you can override
+  4. Settings
+  5. HUD modules (draggable boxes)
+  6. Drawing with ImDrawList
+  7. Input + client helpers
+  8. Talking to other modules
+  9. Adding a new icon or category
+ 10. Rules / gotchas
+ 11. Full examples
+
+
+---------------------------------------------------------------------
+1. QUICK START
+---------------------------------------------------------------------
+
+Step 1 - make a header in the folder of the category it belongs to:
+
+    src/module/modules/render/HelloWorld.h
+
+    #pragma once
+    #include "module/Module.h"
+
+    class HelloWorld : public Module {
+    public:
+        HelloWorld() : Module("Hello World", "Says hi in the middle of the screen",
+                              Category::Render, Icon::Eye) {}
+
+        void onRender(ImDrawList* draw) override {
+            ImVec2 center = ImGui::GetIO().DisplaySize * 0.5f;
+            draw->AddText(center, IM_COL32(255, 255, 255, 255), "hi :3");
+        }
+    };
+
+Step 2 - register it in src/module/ModuleManager.cpp:
+
+    #include "module/modules/render/HelloWorld.h"   // at the top
+    ...
+    add<HelloWorld>();                               // inside ModuleManager::init()
+
+    The order of the add<>() calls is the order rows show in the gui.
+
+Step 3 - rebuild (see README.md) and inject. Your module is now in the
+Render tab, it can be toggled, searched, keybound and it gets saved in
+the config automatically.
+
+Modules can be header only like above. If one gets big, split it into
+a .h and a .cpp in the same folder, CMake picks up every .cpp under
+src/ by itself so there's nothing else to add.
+
+
+---------------------------------------------------------------------
+2. THE MODULE CONSTRUCTOR
+---------------------------------------------------------------------
+
+    Module(name, description, category, icon, key = 0)
+
+  name         shown in the gui + array list, also the config section
+               name, so renaming a module resets its saved settings
+  description  shown when you hover the row and at the top of its
+               settings panel
+  category     Category::Hud, Category::Render, Category::Utility or
+               Category::Client (the tabs on the left of the gui)
+  icon         the little icon in the green square, see gui/Icons.h
+               (Icon::Eye, Icon::Clock, Icon::Crosshair, ...)
+  key          default keybind as a windows virtual key code, eg 'R'
+               or VK_F6. 0 means no keybind. users can change it in
+               the gui
+
+Want it on by default? call setEnabled(true); at the end of your
+constructor (after adding settings). The saved config overrides it.
+
+
+---------------------------------------------------------------------
+3. EVENTS YOU CAN OVERRIDE
+---------------------------------------------------------------------
+
+Only override what you need. Except onEnable / onDisable, they're only
+called while the module is enabled.
+
+  void onEnable()                    module was switched on
+  void onDisable()                   module was switched off
+  void onTick()                      every frame, before drawing.
+                                     good for updating state
+  void onRender(ImDrawList* draw)    every frame, draw your stuff here.
+                                     it's drawn over the game but under
+                                     the click gui
+  void onKey(int vk, bool down)      a key was pressed / released in
+                                     the game window. vk is a windows
+                                     virtual key code (VK_SPACE, 'W')
+                                     not sent while the menu is open.
+                                     key repeat is filtered out
+  void onMouse(int button, bool down)  0 left, 1 right, 2 middle,
+                                     3/4 side buttons. not sent while
+                                     the menu is open
+
+Threads: onTick / onRender run on the render thread. onKey / onMouse
+run on the game's window thread. Both hold the same lock, so you don't
+need your own mutex for data that's only touched from these events.
+
+onEnable can run before the renderer is ready (the config loads right
+at inject), so don't call ImGui functions in onEnable / onDisable.
+ImGui::GetTime / GetIO etc are fine in every other event.
+
+
+---------------------------------------------------------------------
+4. SETTINGS
+---------------------------------------------------------------------
+
+Settings are the options that show when you click a module's row.
+Create them in the constructor and keep the pointer as a member. They
+are saved and loaded by the config for you.
+
+    BoolSetting*   addBool(name, default)
+                   ->value is a bool, drawn as a switch
+
+    SliderSetting* addSlider(name, default, min, max, decimals = 1)
+                   ->value is a float. decimals = 0 gives whole numbers
+
+    ModeSetting*   addMode(name, { "Option A", "Option B" }, defaultIndex = 0)
+                   ->index is the picked index
+                   ->current() is the picked string
+                   ->is("Option A") compares with the picked string
+                   left click cycles forward, right click goes back
+
+    ColorSetting*  addColor(name, r, g, b, a = 1)
+                   ->value is a float[4] with 0..1 values
+
+Example:
+
+    class Example : public Module {
+    public:
+        Example() : Module("Example", "shows every setting type", Category::Utility, Icon::Gear) {
+            enabledThing = addBool("Do the thing", true);
+            size         = addSlider("Size", 10.f, 1.f, 50.f, 0);
+            style        = addMode("Style", { "Circle", "Square" });
+            color        = addColor("Color", 0.1f, 0.8f, 0.5f);
+        }
+
+        void onRender(ImDrawList* draw) override {
+            if (!enabledThing->value) return;
+            ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(color->value[0], color->value[1],
+                                                              color->value[2], color->value[3]));
+            ImVec2 c(100, 100);
+            if (style->is("Circle")) draw->AddCircleFilled(c, size->value, col);
+            else draw->AddRectFilled(c - ImVec2(size->value, size->value),
+                                     c + ImVec2(size->value, size->value), col);
+        }
+
+    private:
+        BoolSetting* enabledThing;
+        SliderSetting* size;
+        ModeSetting* style;
+        ColorSetting* color;
+    };
+
+Hidden settings: set  mySetting->hidden = true;  to save a value in the
+config without showing it in the gui (HudModule uses this for its x/y
+position).
+
+Don't rename a setting after people have configs, the name is the key
+in the config file so the old value would be ignored.
+
+
+---------------------------------------------------------------------
+5. HUD MODULES (draggable boxes)
+---------------------------------------------------------------------
+
+For anything that sits in a spot on screen (counters, timers, ...)
+inherit HudModule instead of Module. You get:
+
+  - dragging with the mouse while the click gui is open
+  - an outline so you can see where it is while dragging
+  - the position saved in the config
+  - it's kept on screen when the window is resized
+
+Instead of onRender you override drawHud. Draw with the top-left at
+pos and return how big the thing you drew was:
+
+    #pragma once
+    #include <cstdio>
+    #include "module/HudModule.h"
+
+    class HelloHud : public HudModule {
+    public:
+        HelloHud() : HudModule("Hello Hud", "a draggable box", Category::Hud,
+                                  Icon::Tag, 10.f, 200.f) {}   // default x, y
+
+        ImVec2 drawHud(ImDrawList* draw, ImVec2 pos) override {
+            return HudStyle::textBox(draw, pos, "Hello", "world");
+        }
+    };
+
+HudStyle::textBox(draw, pos, label, value, background = true) draws the
+standard "Label value" box the built in hud modules use and returns its
+size, so simple hud modules are basically one line.
+
+
+---------------------------------------------------------------------
+6. DRAWING WITH IMDRAWLIST
+---------------------------------------------------------------------
+
+Everything is drawn with Dear ImGui's ImDrawList. Coordinates are in
+pixels from the top-left of the game window. Screen size:
+ImGui::GetIO().DisplaySize
+
+Useful calls:
+  draw->AddLine(a, b, color, thickness)
+  draw->AddRect(min, max, color, rounding, flags, thickness)
+  draw->AddRectFilled(min, max, color, rounding)
+  draw->AddCircle(center, radius, color, segments, thickness)
+  draw->AddCircleFilled(center, radius, color)
+  draw->AddText(pos, color, "text")
+  draw->AddText(font, size, pos, color, "text")
+  draw->AddImage(...)   (needs a texture, not set up by default)
+
+Colors are ImU32, make them with IM_COL32(r, g, b, a) (0..255) or
+ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a)) (0..1).
+
+ImVec2 has + - * / operators, eg  pos + ImVec2(10, 0).
+
+Theme stuff (gui/Theme.h):
+  Theme::accentU32()          the accent color (green by default,
+                              changes with the settings page + Rainbow
+                              Theme)
+  Theme::accentU32(0.5f)      accent at half alpha
+  Theme::accent               the same as an ImVec4
+  Theme::text / textDim / textDark / hudBackground   fixed colors
+  Theme::regular / bold / large                      fonts (segoe ui)
+
+Text size: ImGui::CalcTextSize("text") for the default font or
+font->CalcTextSizeA(size, FLT_MAX, 0.f, "text") for a specific one.
+
+Icons: Icons::draw(draw, Icon::Clock, center, size, color)
+
+
+---------------------------------------------------------------------
+7. INPUT + CLIENT HELPERS
+---------------------------------------------------------------------
+
+From core/Client.h:
+  Client::isKeyDown(vk)    is a key / mouse button held in the game
+                           window (VK_LBUTTON, 'W', VK_SHIFT...)
+  Client::isMenuOpen()     is the click gui open
+  Client::uptime()         seconds since inject
+  Client::friends          std::vector<std::string> from the friends
+                           page
+
+Notifications (module/modules/client/Notifications.h):
+  Notifications::push("text")                  toast if the
+                                               Notifications module is on
+  Notifications::push("text", false)           red toast
+  Notifications::push("text", true, true)      always show it
+
+Timing: ImGui::GetTime() is seconds as a double, ImGui::GetIO().DeltaTime
+is the seconds since last frame, use it to make animations frame rate
+independent:  x += (target - x) * ImMin(1.f, ImGui::GetIO().DeltaTime * 12.f);
+
+
+---------------------------------------------------------------------
+8. TALKING TO OTHER MODULES
+---------------------------------------------------------------------
+
+    #include "module/ModuleManager.h"
+    #include "module/modules/hud/FpsCounter.h"
+
+    if (auto* fps = ModuleManager::get<FpsCounter>(); fps && fps->isEnabled()) { ... }
+
+    Module* m = ModuleManager::find("Crosshair");   // by name, not case sensitive
+    m->toggle();  m->setEnabled(true);  m->isEnabled();
+
+    for (auto& m : ModuleManager::all()) { ... }    // every module
+    ModuleManager::inCategory(Category::Hud)        // one tab
+
+
+---------------------------------------------------------------------
+9. ADDING A NEW ICON OR CATEGORY
+---------------------------------------------------------------------
+
+Icon:
+  1. add a name to the Icon enum in src/gui/Icons.h
+  2. add a case for it in Icons::draw in src/gui/Icons.cpp. The helper
+     P(x, y) turns -1..1 coordinates into pixels inside the icon box,
+     line(x1, y1, x2, y2) draws a line, look at the other icons
+
+Category:
+  1. add it to the Category enum in src/module/Module.h, before Count
+  2. add its name to the names array in categoryName() right below it
+  3. make a folder for it in src/module/modules/
+  The sidebar makes a tab for every category automatically. There's
+  room for about 7 tabs before they reach the friends button.
+
+
+---------------------------------------------------------------------
+10. RULES / GOTCHAS
+---------------------------------------------------------------------
+
+  - Module names have to be unique (the config uses them)
+  - Keep onRender / onTick fast, they run every frame. No Sleep, no
+    file io, no blocking calls
+  - Never call ImGui::Begin / End or make windows from a module, only
+    use the draw list you're given (or GetForegroundDrawList if you need
+    to be on top of the gui)
+  - Don't free/replace the settings vector, keep your pointers
+  - The gui blocks keyboard/mouse from the game while it's open, and
+    your onKey / onMouse won't fire then either
+  - Rendering happens on top of the finished frame, so modules can only
+    draw overlays. Anything that reads or changes the game itself needs
+    game specific hooks/offsets that change every Minecraft update and
+    aren't part of this base
+  - Only use it where you're allowed to. Servers have their own rules
+    about client mods
+
+
+---------------------------------------------------------------------
+11. FULL EXAMPLES
+---------------------------------------------------------------------
+
+Every built in module is a small, readable example:
+
+  src/module/modules/hud/Watermark.h        HudModule, custom text drawing
+  src/module/modules/hud/ArrayList.h        loops over other modules
+  src/module/modules/hud/FpsCounter.h       smallest possible HudModule
+  src/module/modules/hud/CpsCounter.h       onMouse + keeping state
+  src/module/modules/hud/Keystrokes.h       Client::isKeyDown + animation
+  src/module/modules/render/Crosshair.h     sliders, bools and a color
+  src/module/modules/render/BackgroundDim.h reacts to the menu opening
+  src/module/modules/utility/Clock.h        mode setting
+  src/module/modules/utility/SessionTimer.h onEnable
+  src/module/modules/client/RainbowTheme.h  onEnable/onDisable restore
+  src/module/modules/client/Notifications.* static api for other code
+
+Have fun :3
