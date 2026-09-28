@@ -1,0 +1,49 @@
+name: Build
+
+# builds on every push, and when you push a tag like v1.0.0 it also makes a github release with the files
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/TarClient.dll, build/Release/TarClientJava.dll, build/Release/TarInjector.exe, README.md, MODULES.txt dist/
+          Compress-Archive -Path dist/* -DestinationPath TarClient.zip -Force
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: TarClient
+          path: dist/
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tar Client ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            TarClient.zip
+            dist/TarClient.dll
+            dist/TarClientJava.dll
+            dist/TarInjector.exe
