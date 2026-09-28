@@ -10,7 +10,7 @@ An injectable ImGui overlay/click GUI for Minecraft **Bedrock** and **Java** on 
 - Draggable HUD elements
 - Config that saves on its own (module states, keybinds, settings, accent color, and friends)
 - Toast notifications and an accent color you can change
-- A small injector that finds either edition
+- A single-file injector with both DLLs built in
 
 To add your own modules, see **[MODULES.txt](MODULES.txt)**.
 
@@ -43,9 +43,10 @@ MinGW-w64 works too: `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release`
 ## Using it
 
 1. Start Minecraft (Bedrock or Java).
-2. Put `TarInjector.exe` next to the DLLs and run it. It picks Bedrock if Bedrock is running, otherwise it looks for a Java game window.
+2. Run `TarInjector.exe`. That's the only file you need, because both DLLs are packed inside it and it unpacks the right one to `%APPDATA%\TarClient\bin`. It picks Bedrock if Bedrock is running, otherwise it waits for a Java game window.
    - To force one, use `TarInjector.exe --java` or `TarInjector.exe --bedrock`. You can also pass a DLL path.
-   - For another LoadLibrary injector, pick `Minecraft.Windows.exe` for Bedrock, or the game's `javaw.exe` for Java.
+   - If a `TarClient.dll` or `TarClientJava.dll` sits next to the exe, the injector uses that one instead (handy while developing).
+   - For another LoadLibrary injector, use the loose DLLs: `Minecraft.Windows.exe` for Bedrock, or the game's `javaw.exe` for Java.
 3. In game, press **Insert** to open the menu. You can change this key on the settings page.
 
 Controls:

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TarClient LANGUAGES C CXX)
+project(TarClient LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,7 +81,16 @@ if(MSVC)
 endif()
 
 # ---- tiny injector ----
-add_executable(TarInjector injector/Injector.cpp)
+# the injector carries both dlls inside it as resources, so it works as a single exe
+file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/embed_$<CONFIG>.rc CONTENT
+"101 RCDATA \"$<TARGET_FILE:TarClient>\"
+102 RCDATA \"$<TARGET_FILE:TarClientJava>\"
+")
+add_executable(TarInjector injector/Injector.cpp ${CMAKE_BINARY_DIR}/embed_$<CONFIG>.rc)
+add_dependencies(TarInjector TarClient TarClientJava)
+# re-embed when a dll changes
+set_source_files_properties(${CMAKE_BINARY_DIR}/embed_$<CONFIG>.rc PROPERTIES
+    OBJECT_DEPENDS "$<TARGET_FILE:TarClient>;$<TARGET_FILE:TarClientJava>")
 if(MSVC)
     target_compile_options(TarInjector PRIVATE /utf-8)
 endif()

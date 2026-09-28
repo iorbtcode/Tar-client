@@ -1,7 +1,8 @@
 // Tiny LoadLibrary injector for Minecraft Bedrock and Java.
 // usage: TarInjector.exe [--bedrock | --java] [path\to\dll]
 //   no edition flag: bedrock if it's running, otherwise java
-//   no dll: TarClient.dll (bedrock) or TarClientJava.dll (java) next to the exe
+//   no dll: TarClient.dll / TarClientJava.dll next to the exe if it's there, otherwise the copy
+//   built into the exe gets unpacked to %APPDATA%\TarClient\bin and used
 #include <windows.h>
 
 #include <aclapi.h>
@@ -11,6 +12,7 @@
 #include <conio.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -129,6 +131,57 @@ namespace {
         std::printf("\n");
     }
 
+    // ---------------------------------------------------------------- built in dlls
+
+    constexpr int BEDROCK_DLL = 101, JAVA_DLL = 102; // ids from the generated embed .rc
+
+    bool sameContents(const std::wstring& path, const void* data, DWORD size) {
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return false;
+        std::string existing(size, '\0');
+        DWORD read = 0;
+        bool same = GetFileSize(f, nullptr) == size && ReadFile(f, existing.data(), size, &read, nullptr) && read == size &&
+                    memcmp(existing.data(), data, size) == 0;
+        CloseHandle(f);
+        return same;
+    }
+
+    bool writeFile(const std::wstring& path, const void* data, DWORD size) {
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        bool ok = WriteFile(f, data, size, &written, nullptr) && written == size;
+        CloseHandle(f);
+        return ok;
+    }
+
+    // unpacks a dll from inside the exe, returns an empty string if that fails
+    std::wstring unpackDll(int id, const wchar_t* name) {
+        HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10)); // 10 = RT_RCDATA
+        HGLOBAL loaded = res ? LoadResource(nullptr, res) : nullptr;
+        const void* data = loaded ? LockResource(loaded) : nullptr;
+        DWORD size = res ? SizeofResource(nullptr, res) : 0;
+        if (!data || !size) return L"";
+
+        wchar_t appdata[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH)) return L"";
+        std::wstring dir = std::wstring(appdata) + L"\\TarClient";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        dir += L"\\bin";
+        CreateDirectoryW(dir.c_str(), nullptr);
+
+        std::wstring path = dir + L"\\" + name;
+        if (sameContents(path, data, size)) return path; // already unpacked (maybe even loaded in the game right now)
+        if (writeFile(path, data, size)) return path;
+
+        // an older version is still loaded in a game and locked, use a new name instead
+        std::wstring stem(name);
+        stem = stem.substr(0, stem.find_last_of(L'.'));
+        path = dir + L"\\" + stem + L"_" + std::to_wstring(GetTickCount()) + L".dll";
+        return writeFile(path, data, size) ? path : L"";
+    }
+
     int fail(const char* message) {
         DWORD err = GetLastError();
         std::printf("  %s✘  %s%s", Color::red(), message, Color::reset());
@@ -185,11 +238,19 @@ int wmain(int argc, wchar_t** argv) {
     info("edition", java ? "Java" : "Bedrock");
     info("process", pidText);
 
+    const wchar_t* dllName = java ? L"TarClientJava.dll" : L"TarClient.dll";
+    bool builtIn = false;
     if (dll.empty()) {
+        // a dll sitting next to the exe wins (handy while developing), otherwise use the built in one
         wchar_t exe[MAX_PATH];
         GetModuleFileNameW(nullptr, exe, MAX_PATH);
         dll = exe;
-        dll = dll.substr(0, dll.find_last_of(L"\\/") + 1) + (java ? L"TarClientJava.dll" : L"TarClient.dll");
+        dll = dll.substr(0, dll.find_last_of(L"\\/") + 1) + dllName;
+        if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            dll = unpackDll(java ? JAVA_DLL : BEDROCK_DLL, dllName);
+            builtIn = true;
+            if (dll.empty()) return fail("couldn't unpack the built in dll (antivirus might be blocking it)");
+        }
     }
 
     wchar_t full[MAX_PATH];
@@ -197,10 +258,12 @@ int wmain(int argc, wchar_t** argv) {
         SetLastError(0);
         info("dll", narrow(dll).c_str());
         std::printf("\n");
-        return fail("couldn't find the dll, keep it in the same folder as the injector");
+        return fail("couldn't find the dll");
     }
     dll = full;
-    info("dll", narrow(dll.substr(dll.find_last_of(L"\\/") + 1)).c_str());
+    std::string shown = narrow(dll.substr(dll.find_last_of(L"\\/") + 1));
+    if (builtIn) shown += " (built in)";
+    info("dll", shown.c_str());
     std::printf("\n");
 
     if (!java) allowAppContainer(dll);
